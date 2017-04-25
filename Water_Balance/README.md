@@ -1,6 +1,9 @@
 Michael Amodeo
+
 Python Bridge Course
+
 Midterm Project
+
 Water Balance analysis
 
 # Project Description
