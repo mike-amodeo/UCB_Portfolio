@@ -1,0 +1,344 @@
+---
+title: "Airport Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+
+list.of.packages <- c("ggplot2", "flexdashboard", "ggmap", "maps", "mapdata", "reshape2", "stringr", "scales", "plotly", "plyr")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, dependencies = TRUE)
+library(flexdashboard)
+library(ggplot2)
+library(ggmap)
+library(maps)
+library(mapdata)
+library(reshape2)
+library(stringr)
+library(scales)
+library(plotly)
+library(plyr)
+```
+
+Volume
+======================================================================= 
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+
+**Dashboard Navigation:**
+
+Use the **Volume** tab to explore airports with the busiest departures and arrivals by volume
+
+Use the **Delays by Origin** tab to explore some of the worst offenders in delayed flights, most freuqent cause of delays, and the worst day of the week to fly in popular airports
+
+Use the **Delays by Route** tab to explore which routes experience the most delays 
+
+Use the **Weather Metrics** tab to explore how precipitation in large cities affect filghts in those cities 
+
+Use the **Forecasted Delays** tab to explore how likely a plane is likely to be delayed due to precipitation 
+
+
+
+**Notes:**
+
+Any and all graphs can be filtered by clicking on the airport or city in the margin
+
+For optimal view of the dashboard, please maximize your window
+
+Data is based on historical airport and weather data from the last 10 years 
+
+
+
+
+**Authors:** 
+
+Michael Alexander, Mike Amodeo, Roseanna Hopper, Yifan Sun
+
+
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### Top 25 US Airports by Departure Volume
+
+```{r}
+airports <- read.csv("https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat", header = FALSE)
+colnames(airports) <- c("ID", "name", "city", "country", "IATA_FAA", "ICAO", "lat", "long", "altitude", "timezone", "DST")
+busydep <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/top25airportsdep.csv", header = FALSE)
+colnames(busydep) <- c("ID", "Origin", "X2007", "X2008", "X2009", "X2010", "X2011", "X2012", "X2013", "X2014", "X2015", "X2016")
+busyarr <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/top25airportsarr.csv", header = FALSE)
+colnames(busyarr) <- c("ID", "Dest", "X2007", "X2008", "X2009", "X2010", "X2011", "X2012", "X2013", "X2014", "X2015", "X2016")
+busydep <- busydep[-1,]
+busyarr <- busyarr[-1,]
+years <- c(colnames(busydep)[3: ncol(busydep)])  
+usairports <- subset(airports, country == "United States")
+busydep[, years] <- lapply(busydep[, years], function(x) as.numeric(as.character(x)))
+busyarr[, years] <- lapply(busyarr[, years], function(x) as.numeric(as.character(x)))
+busydepairports <- merge(busydep, usairports, by.x=c("Origin"), by.y=c("IATA_FAA"))
+busydepairports$meanvol <- rowMeans(busydep[, years], na.rm = T)
+
+
+usmap <- get_map(location = "United States", zoom=4, maptype="terrain",
+                 source = "google", color = "color")
+
+airportmapdep <- ggmap(usmap) + geom_point(aes(x = long, y=lat, size=meanvol, color = Origin), data=busydepairports, alpha = 1.0) +
+  theme(legend.position = "none", axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+airportmapdep
+
+```
+
+
+### Top 25 US Airports by Arrival Volume
+```{r}
+
+busyarrairports <- merge(busyarr, usairports, by.x=c("Dest"), by.y=c("IATA_FAA"))
+
+years = c(colnames(busyarr)[3: ncol(busyarr)])
+busyarrairports$meanvol <- rowMeans(busyarr[, years], na.rm = T)
+
+
+usmap <- get_map(location = "United States", zoom=4, maptype="terrain",
+                 source = "google", color = "color")
+
+airportmaparr <- ggmap(usmap) + geom_point(aes(x = long, y=lat, size=meanvol, color = Dest), data=busyarrairports, alpha = 1.0) +
+  theme(legend.position = "none", axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+
+airportmaparr
+```
+
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Average Annual Departure Volume
+
+```{r}
+
+dep <- busydep[, 2:ncol(busydep)]
+
+deptimeseries1 <- melt(dep, id.vars="Origin", value.name = "value", variable.name = "Year")
+deptimeseries1$Year<- substr(deptimeseries1$Year, 2,5) 
+
+deptimeseries <- ggplot(data=deptimeseries1, aes(x=Year, y=value, group = Origin, color = Origin)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Year", y= "Annual Departure Volume") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+deptimeseries
+
+ggplotly(deptimeseries)
+
+```
+
+### Average Annual Arrival Volume
+
+```{r}
+
+arr <- busyarr[, 2:ncol(busyarr)]
+
+arrtimeseries1 <- melt(arr, id.vars="Dest", value.name = "value", variable.name = "Year")
+arrtimeseries1$Year<- substr(arrtimeseries1$Year, 2,5) 
+
+arrtimeseries <- ggplot(data=arrtimeseries1, aes(x=Year, y=value, group = Dest, color = Dest)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Year", y= "Annual Arrival Volume") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+arrtimeseries
+
+ggplotly(arrtimeseries)
+
+```
+
+
+
+
+
+Delays by Origin
+=======================================================================
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### Airports with Highest Proportion of Delayed Flights
+
+```{r}
+high_delay_prop <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/highest_delay_prop.csv", header = TRUE)
+
+high_delay_prop <- plyr::arrange(high_delay_prop, origin)
+
+highprop <- ggplot(data=high_delay_prop, aes(x=origin, y=delayprop, color=origin, fill=origin)) + geom_bar(stat = "identity") + 
+  ggtitle("From Top 100 Airports by Departure Volume") + labs(x="Origin", y="Proportion of Delayed Flights") + scale_y_continuous(labels=comma)  + theme(axis.text.x=element_text(angle=90, hjust=1), plot.title= element_text(color="#666666", size=12, hjust=.7))  + theme(legend.position="none")
+highprop
+ggplotly(highprop)
+```
+
+### Airports with Highest Proportion of Long Delays (>1 hr.)
+
+```{r}
+long_delay_prop <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/highest_long_delay_prop.csv", header = TRUE)
+
+long_delay_prop <- plyr::arrange(long_delay_prop, origin)
+
+longprop <- ggplot(data=long_delay_prop, aes(x=origin, y=delayprop, color=origin, fill=origin)) + geom_bar(stat = "identity") + ggtitle("From Top 100 Airports by Departure Volume") + labs(x="Origin", y="Proportion of Flights Delayed > 1 Hour") + scale_y_continuous(labels=comma)  + theme(axis.text.x=element_text(angle=90, hjust=1), plot.title= element_text(color="#666666", size=12, hjust=.7))  + theme(legend.position="none")
+longprop
+ggplotly(longprop)
+```
+
+
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Most Frequent Cause of Delay Over Time
+
+```{r}
+delay_cause <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/delay_cause_total_year.csv", header = TRUE)
+
+delay_cause_timeseries <- melt(delay_cause, id.vars="delay_cause_total_year.year", value.name = "value", variable.name = "Cause")
+
+levels(delay_cause_timeseries$Cause) <- c('Carrier', 'Weather', 'National Airspace System', 'Security', 'Late Aircraft')
+
+delay_plot <- ggplot(data=delay_cause_timeseries, aes(x=delay_cause_total_year.year, y=value, group = Cause, color = Cause)) + 
+  geom_line() + 
+  geom_point(size=1, shape = 21, fill = "white") + 
+  labs(x="Year", y= "Total Annual Delay Minutes") + 
+  scale_color_discrete(name = "Cause of Delay") +
+  scale_y_continuous(labels = comma) + 
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+
+ggplotly(delay_plot)
+```
+
+### Worst Weekday Delays 
+
+```{r}
+weekday_delay <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/worst_dayofweek_final.csv", header = TRUE)
+
+weekday_agg = as.data.frame(table(weekday_delay$worst_dayofweek_final.worst_dayofweek))
+
+weekday_agg$Var1 <- factor(weekday_agg$Var1, levels= c("Sunday", "Monday", 
+    "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+
+weekday_plot <- ggplot(data=weekday_agg, aes(x=Var1,y=Freq,color=Var1,fill=Var1)) +
+  geom_bar(position="dodge",stat="identity") + 
+  theme(legend.position = "none") +
+  labs(x="", y= "Airport Frequency") +
+  coord_flip() +
+  ggtitle("Worst Day for Delays") 
+
+ggplotly(weekday_plot)
+```
+
+
+Delays by Route
+=======================================================================
+
+Column
+-----------------------------------------------------------------------
+
+### Routes with Longest Arrival Delays
+
+```{r}
+arrdelay_route <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/arr_delay_route.csv", header = TRUE)
+
+arrdelay_route <- plyr::arrange(arrdelay_route, route)
+
+arrdel_route <- ggplot(data=arrdelay_route, aes(x=route, y=avgarrdelay, color=route, fill=route)) + geom_bar(stat = "identity") + ggtitle("Longest Average Arrival Delays") + labs(x="Route", y="Arrival Delay (Minutes)") + scale_y_continuous(labels=comma)  + theme(axis.text.x=element_text(angle=90, hjust=1), plot.title= element_text(color="#666666", size=12, hjust=.5))+ theme(legend.position="none")
+arrdel_route
+ggplotly(arrdel_route)
+```
+
+
+### Routes with Longest Departure Delays
+```{r}
+depdelay_route <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/dep_delay_route.csv", header = TRUE)
+
+depdelay_route <- plyr::arrange(depdelay_route, route)
+
+depdel_route <- ggplot(data=depdelay_route, aes(x=route, y=avgdepdelay, color=route, fill=route)) + geom_bar(stat = "identity") + ggtitle("Longest Average Departure Delays") + labs(x="Route", y="Departure Delay (Minutes)") + scale_y_continuous(labels=comma)  + theme(axis.text.x=element_text(angle=90, hjust=1), plot.title= element_text(color="#666666", size=12, hjust=.5))+ theme(legend.position="none")
+depdel_route
+ggplotly(depdel_route)
+```
+
+Weather Metrics 
+=======================================================================
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### Annual Days with Precipitation
+
+```{r}
+precip_days <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/Q1_precip_days_ann.csv", header = TRUE)
+colnames(precip_days) <- c("Origin", "Annual_days")
+precip_airports <- merge(precip_days, usairports, by.x=c("Origin"), by.y=c("IATA_FAA"))
+airportmap_precip <- ggmap(usmap) + geom_point(aes(x = long, y=lat, size=Annual_days, color = Origin), data=precip_airports, alpha = 1.0) +
+  theme(legend.position = "none", axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+airportmap_precip
+```
+
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Percentage of Flights Delayed by Weather
+
+```{r}
+likelihood_monthly <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/Q2_likelihood_month.csv", header = TRUE)
+colnames(likelihood_monthly) <- c("Origin", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+likelihood_melt <- melt(likelihood_monthly, id="Origin", value.name = "value", variable.name = "Month")
+likelihood <- ggplot(data=likelihood_melt, aes(x=Month, y=value, group = Origin, color = Origin)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Month", y= "Percentage of Flights Delayed by Weather") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+likelihood
+ggplotly(likelihood)
+```
+
+### Likelihood of Delay due to Depth of Precipitation
+
+```{r}
+likelihood_depth <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/Q3_likelihood_based_on_depth.csv", header = TRUE)
+colnames(likelihood_depth) <- c("Origin", "0 in", "1/4 in", "1/2 in", "1 in", "1.5 in", "2 in", "3 in", "4 in")
+likelihood_depth_melt <- melt(likelihood_depth, id = "Origin", value.name = "likelihood", variable.name = "depth")
+likelihood_D <- ggplot(data=likelihood_depth_melt, aes(x=depth, y=likelihood, group = Origin, color = Origin)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Depth of Rainfall", y= "Likelihood of Delay") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+likelihood_D
+ggplotly(likelihood_D)
+```
+
+
+
+Forecasted Delays 
+=======================================================================
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+
+### 10 Day Delay Forecast Map
+
+```{r}
+forecast <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/Q4_forecast_delays.csv", header = TRUE)
+#colnames(forecast) <- c("Origin", "Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7", "Day 8", "Day 9", "Day 10")
+forecast$Total <- rowSums(forecast[2:11])
+forecast_delays <- melt(forecast, id = "Origin", value.name = "Delays", variable.name = "Day")
+delays_airports <- merge(forecast, usairports, by.x=c("Origin"), by.y=c("IATA_FAA"))
+forecast_map <- ggmap(usmap) + geom_point(aes(x = long, y=lat, size=Total, color = Origin), data=delays_airports, alpha = 1.0) +
+  theme(legend.position = "none", axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank())
+forecast_map
+```
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### 10 Day Forecasted Precipitation
+
+```{r}
+forecast_precip <- read.csv("https://raw.githubusercontent.com/r-hopper/W205-Final-Project/master/flight_app/final_csv/Q5_forecast_rain.csv", header = TRUE)
+forecast_precip_melt <- melt(forecast_precip, id = "Origin", value.name = "Precipitation", variable.name = "Date")
+forecast_graph <- ggplot(data=forecast_precip_melt, aes(x=Date, y=(Precipitation / 25.4), group = Origin, color = Origin)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Next 10 Days", y= "Precipitation (in)") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+ggplotly(forecast_graph)
+```
+
+
+### Projected Delays in the Next 10 Days Due to Precipitation
+
+```{r}
+forecast_lines <- ggplot(data=forecast_delays[forecast_delays$Day != 'Total', ], aes(x=Day, y=Delays, group = Origin, color = Origin)) + geom_line() + geom_point(size=1, shape = 21, fill = "white") + labs(x="Next 10 Days", y= "Projected Number of Delays") + scale_y_continuous(labels = comma) + theme(axis.text.x=element_text(angle=90, hjust=1))
+ggplotly(forecast_lines)
+```
