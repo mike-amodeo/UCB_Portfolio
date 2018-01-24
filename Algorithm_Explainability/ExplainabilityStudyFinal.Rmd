@@ -1,0 +1,1075 @@
+---
+title: "Explanability Study"
+author: "Michael Amodeo, Krista Mar, Mona Iwamoto"
+date: \today
+output: pdf_document
+
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+
+# load packages 
+library(data.table)
+library(foreign)
+library(lmtest)
+library(sandwich)
+library(multiwayvcov)
+library(stargazer)
+library(AER)
+library(reshape2)
+library(ggplot2)
+```
+## Data Import and Prepration
+
+### Import data
+Data was exported from Qualtrics using the Legacy Format CSV export. This allowed for additional fields based on whether questions were seen, even if the questions did not require answers. 
+
+```{r}
+#Import all data
+all_content = readLines("Explainability_Study_legacy_export.csv")
+
+#Delete second and third rows of not useful information
+skip_second = all_content[-c(2,3)]
+
+#Create table and data.table
+d <-read.csv(textConnection(skip_second), header = TRUE, stringsAsFactors = FALSE)
+d <- data.table(d)
+
+remove(all_content, skip_second)
+
+# Create new data table without fields we are not using
+dt <- d[,-c('ResponseSet','IPAddress','StartDate','EndDate','RecipientLastName',
+          'RecipientFirstName','RecipientEmail','ExternalDataReference','Status',
+          'Q_TotalDuration','Enter.Embedded.Data.Field.Name.Here...','LocationLatitude',
+          'LocationLongitude','LocationAccuracy', 'Q3.5', 'Q4.5', 'Q6.5', 'Q7.5', 'Q8.1', 
+          'Q9.1','Q10.1', 'Q10.3')]
+
+# Rename variables
+old_names <- colnames(dt)
+
+##  Key to var names: tc = Twitter control group
+#                     tt = Twitter treatment group
+#                     rc = recidivism control group 
+#                     rt = recidivism treatment group
+
+new_names <- c("ResponseID","Finished","First.Context","random","intro","tweet",
+               "tControl", 'tcFair', 'tcAcc', 'tcSat', 'tcUseful', 'tcClear', 
+               'tcMeaningful', 'tcReqInfo1', 'tcReqInfo2', 'tcReqInfo3', 'tcReqInfo4',
+               'tcReqInfo4_txt',
+               "tTreat", 'ttFair', 'ttAcc', 'ttSat', 'ttUseful', 'ttClear',
+               'ttMeaningful', 'ttReqInfo1', 'ttReqInfo2', 'ttReqInfo3', 'ttReqInfo4',
+               'ttReqInfo4_txt',
+               'recidivism', 
+               'rControl', 'rcFair', 'rcAcc', 'rcSat', 'rcUseful', 'rcClear', 
+               'rcMeaningful', 'rcReqInfo1', 'rcReqInfo2', 'rcReqInfo3', 'rcReqInfo4',
+               'rcReqInfo4_txt',
+               "rTreat", 'rtFair', 'rtAcc', 'rtSat', 'rtUseful', 'rtClear',
+               'rtMeaningful', 'rtReqInfo1', 'rtReqInfo2', 'rtReqInfo3', 'rtReqInfo4',
+               'rtReqInfo4_txt',
+               'ageGroup', 'white', 'black', 'native', 'asian', 'pac_isle', 'hispanic', 
+               'other', 'gender', 'socMed', 'educ', 'feedback')
+
+setnames(dt, old_names, new_names)
+#colnames(dt)
+remove(old_names)
+```
+
+### Data Cleanup
+
+The questions were based on a 5 point Likert scale. For each metric, the answers varied from "Extremely" to "Not at All." Most Qualtrics questions were set so the extreme positive value was the first choice (1). In order to show an increase in acceptance or trust as positive, we will rescale these values and flip them around the median value (3). 
+
+```{r results = 'hide'}
+# Function to flip the scale to show more positive as larger number
+flip <- function(originalScale) {
+  x <- originalScale - 3        #  3 is median
+  return(3 - x)
+}
+
+# For an unknown reason, question 7.2 Fairness for Recidivism Treatment 
+# the values were offset by 24.  This was cross-checked with the text-based responses.
+# Additionally, education attempted to approximate years of education, but it is
+# more correct to just use the numbers as levels (1-7).
+
+dt$rtFair <- dt$rtFair - 24      # Qualtrics weirdness
+dt$educ <- dt$educ - 10      # Qualtrics weirdness
+
+
+# For the Twitter fairness questions, the Qualtrics survey 
+# responses did not need to be flipped. All others
+# are reversed using the flip function below
+
+# Organize scales so larger values correlate to more fair, more accurate, etc.
+
+flip_cols <- c("tcAcc", "tcSat", "tcUseful", "tcClear", "tcMeaningful", 
+               "ttFair", "ttAcc", "ttSat", "ttUseful", "ttClear", "ttMeaningful", 
+               "rcAcc", "rcSat", "rcUseful", "rcClear", "rcMeaningful", 
+               "rtFair", "rtAcc", "rtSat", "rtUseful", "rtClear", "rtMeaningful")
+
+dt[,  (flip_cols) := lapply(.SD, flip), .SDcols = flip_cols]
+```
+
+### Consolidate each metric across treatments
+
+Because the Qualtrics format requires each question to be different, we have to consolidate the responses for each metric into a single value per context. Because respondents either saw control or treatment for each context, we simply make a new metric that is the sum of the old metrics.
+
+```{r results = 'hide', warning = FALSE}
+
+# Create consolidated data table
+dc <- data.table(ResponseID = dt[, ResponseID])
+
+# Set fields for treatment/control assignments across contexts.
+dc[, complete := !is.na(dt[, random])] # Did they complete the survey?
+dc[, tAssign := dt[, tTreat] == 1 | dt[, tControl] == 1] #Was a Twitter treatment assigned?
+dc[, tControl := !is.na(dt[, tControl])]
+dc[, tTreat := !is.na(dt[, tTreat])]
+dc[, rControl := !is.na(dt[, rControl])]
+dc[, rTreat := !is.na(dt[, rTreat])]
+dc[, rAssign := dt[, rTreat] == 1 | dt[, rControl] == 1] #Was a recidivism treatment assigned?
+dc[, tweet := !is.na(dt[, tweet])] # Did they reach the Twitter context?
+dc[, recidivism := !is.na(dt[, recidivism])] # Did they reach the recidivism context?
+
+# Simplify metric ratings
+dc[, tFair := rowSums(dt[, c('tcFair', 'ttFair')], na.rm=T)]
+dc[, tAcc := rowSums(dt[, c('tcAcc', 'ttAcc')], na.rm=T)]
+dc[, tSat := rowSums(dt[, c('tcSat', 'ttSat')], na.rm=T) ]
+dc[, tUseful := rowSums(dt[, c('tcUseful', 'ttUseful')], na.rm=T)]
+dc[, tClear := rowSums(dt[, c('tcClear', 'ttClear')], na.rm=T)]
+dc[, tMeaningful := rowSums(dt[, c('tcMeaningful', 'ttMeaningful')], na.rm=T)]
+
+dc[, rFair := rowSums(dt[,c('rcFair', 'rtFair')], na.rm=T)]
+dc[, rAcc := rowSums(dt[,c('rcAcc', 'rtAcc')], na.rm=T)]
+dc[, rSat := rowSums(dt[,c('rcSat', 'rtSat')], na.rm=T) ]
+dc[, rUseful := rowSums(dt[,c('rcUseful', 'rtUseful')], na.rm=T)]
+dc[, rClear := rowSums(dt[,c('rcClear', 'rtClear')], na.rm=T)]
+dc[, rMeaningful := rowSums(dt[,c('rcMeaningful', 'rtMeaningful')], na.rm=T)]
+
+dc[, tReqInfo1 := rowSums(dt[,c('tcReqInfo1', 'ttReqInfo1')], na.rm=T)]
+dc[, tReqInfo2 := rowSums(dt[,c('tcReqInfo2', 'ttReqInfo2')], na.rm=T)]
+dc[, tReqInfo3 := rowSums(dt[,c('tcReqInfo3', 'ttReqInfo3')], na.rm=T)]
+
+dc[, rReqInfo1 := rowSums(dt[,c('rcReqInfo1', 'rtReqInfo1')], na.rm=T)]
+dc[, rReqInfo2 := rowSums(dt[,c('rcReqInfo2', 'rtReqInfo2')], na.rm=T)]
+dc[, rReqInfo3 := rowSums(dt[,c('rcReqInfo3', 'rtReqInfo3')], na.rm=T)]
+
+dc[, white := !is.na(dt[, white])]
+dc[, black := !is.na(dt[, black])]
+dc[, native := !is.na(dt[, native])]
+dc[, asian := !is.na(dt[, asian])]
+dc[, pac_isle := !is.na(dt[, pac_isle])]
+dc[, hispanic := !is.na(dt[, hispanic])]
+dc[, other := !is.na(dt[, other])]
+
+dc[, male := (dt[, gender]==1)]
+dc[, female := (dt[, gender]==2)]
+dc[, gender_nc := (dt[, gender]==3)]
+
+
+dt1 <- dt[, c('ageGroup', 'socMed', 'educ', 'First.Context')]
+
+dc <- cbind(dc,dt1)
+
+# Converting to binaries instead of logicals
+(to.replace <- names(which(sapply(dc, is.logical))))
+for (var in to.replace) dc[, var:= as.numeric(get(var)), with=FALSE]
+
+head(dc)
+
+```
+
+### Randomization Check
+
+#### Were the two contexts assigned equally?
+
+The first randomization assigned which context the respondent would see first. We check to see if that randomization evenly distributed the order of contexts seen.
+
+```{r}
+dc[, .N, by = First.Context]
+
+```
+
+`r dt[First.Context == 'Recidivism', .N]` received the 'Recidivism' context first. `r dt[First.Context == 'Twitter', .N]` received the 'Twitter' context first. This was as even a split as possible. Next we check if each context received similar assignment to treatment.
+
+```{r}
+dc[, .N, by = .(tTreat, tAssign)]
+```
+
+In this instance, we see that of those assigned to either treatment or control in the Twitter context (**tAssign**), it was a pretty even split between treatment and control. However, those 14 that were not assigned to either treatment or control are indicative of attrition that we will need to review in greater detail. They did not make it to the step of Twitter assignment. They could have dropped out during Recidivism context first, or even at the introduction page to the survey.
+
+```{r}
+dc[, .N, by = .(rTreat, rAssign)]
+```
+
+Similarly, we see a pretty even split between recidivism context assignment, with another 13 instances of some form attrition. Some of these will overlap with the other examples of attrition.
+
+#### Was treatment assigned equally across contexts? 
+```{r}
+dc[complete == 1, .N, by = .(First.Context, tTreat, rTreat)]
+```
+
+Of the eight possible combinations of context order, Twitter treatment, and recidivism treatment, there are a fairly equal number of respondents who completed the survey in each category. This shows that our randomization worked at every level.
+
+#### Were all questions answered?
+
+```{r}
+## Show number of responses for each question
+apply(dt, 2, function(x) length(which(!is.na(x))))
+```
+
+From this, it appears that there were a couple instances of attrition in the middle of answering questions about a treatment. Note the drop from 312 to 311 between **ttSat** and **ttUseful**, or the drop from 316 to 315 between **rtSat** and **rtUseful**.
+
+#### Attrition effects
+
+Out of `r nrow(dt)` surveys, `r dt[na.omit(random), .N]` were completed. Was either context more impacted than the other?
+
+```{r}
+dc[ , sum(complete)/.N, by = First.Context]
+```
+
+Similar ratios completed the survey regardless of which context they started with. This does not seem indicative of a problem with the experiment, but we will need to be careful about how we calculate effects.
+
+```{r}
+dc[, .N, by = .(First.Context, tTreat, rTreat, tAssign, rAssign)]
+```
+
+To look again at all possible combinations, we see that the largest number of dropouts we had were the 10 who were assigned a context but did not make it far enough to be assigned to treatment or control for either context. These respondents must have followed the link to Qualtrics but then dropped out without doing anything within Qualtrics. The other instances of attrition are pretty small and even (1 or 2 for each group who did not make it to a second context). Overall, there might be a very small effect because of attrition, but it does not seem to be due to the experiment design or content and does not affect the contexts differently.
+
+## Define Metrics
+
+The metrics we evaluated were split into two groups. The first three asked respondents to rate the decision that was made with respect to fairness, accuracy, and their satisfaction with the decision. The second three asked specifically about the explanation itself. Respondents were asked if the explanation was useful, clear, and meaningful. Again, each of these responses were based on a 5 point Likert scale.
+
+###Twitter Response Histograms
+
+```{r}
+par(mfrow=c(2,3))
+hist(dt$tcFair, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Fairness", xlab="Fairness", ylim=c(0,175))
+hist(dt$ttFair,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+#legend("topright", c("Control", "Treatment"), fill=c("blue", "red"))
+
+hist(dt$tcAcc, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Accuracy", xlab="Accuracy", ylim=c(0,175))
+hist(dt$ttAcc,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcSat, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Satifaction", xlab="Satisfaction", ylim=c(0,175))
+hist(dt$ttSat,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcUseful, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Usefulness", xlab="Usefulness", ylim=c(0,175))
+hist(dt$ttUseful,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcClear, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Clarity", xlab="Clarity", ylim=c(0,175))
+hist(dt$ttClear,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcMeaningful, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Meaningfulness", xlab="Meaningfulness", ylim=c(0,175))
+hist(dt$ttMeaningful,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+```
+
+The histograms show a shift to the right for each metric. Using a Wilcox rank sum test, we can test whether this shift is significant.
+
+```{r}
+wilcox.test(tFair ~ tTreat , data = dc)$p.value
+wilcox.test(tAcc ~ tTreat , data = dc)$p.value
+wilcox.test(tSat ~ tTreat , data = dc)$p.value
+wilcox.test(tUseful ~ tTreat , data = dc)$p.value
+wilcox.test(tClear ~ tTreat , data = dc)$p.value
+wilcox.test(tMeaningful ~ tTreat , data = dc)$p.value
+
+```
+All six metrics show statistical significance for the shift using the Wilcox rank sum test.
+
+###Recidivism Responses Histogram
+```{r}
+par(mfrow=c(2,3))
+hist(dt$rcFair, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Fairness", xlab="Fairness", ylim=c(0,175))
+hist(dt$rtFair,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+#legend("topright", c("Control", "Treatment"), fill=c("blue", "red"))
+
+hist(dt$rcAcc, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Accuracy", xlab="Accuracy", ylim=c(0,175))
+hist(dt$rtAcc,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcSat, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Satifaction", xlab="Satisfaction", ylim=c(0,175))
+hist(dt$rtSat,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcUseful, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Usefulness", xlab="Usefulness", ylim=c(0,175))
+hist(dt$rtUseful,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcClear, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Clarity", xlab="Clarity", ylim=c(0,175))
+hist(dt$rtClear,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcMeaningful, col=rgb(0,0,1,1/4), breaks = seq(0.5, 5.5, 1),
+     main= "Recidivism Meaningfulness", xlab="Meaningfulness", ylim=c(0,175))
+hist(dt$rtMeaningful,col=rgb(1,0,0,1/4), breaks = seq(0.5, 5.5, 1), add=T)
+```
+
+In both contexts, we can see a difference between control and treatment that increases each of the metrics under treatment. Using a Wilcox rank sum test, we can test whether this shift is significant.
+
+```{r}
+wilcox.test(rFair ~ rTreat , data = dc)$p.value
+wilcox.test(rAcc ~ rTreat , data = dc)$p.value
+wilcox.test(rSat ~ rTreat , data = dc)$p.value
+wilcox.test(rUseful ~ rTreat , data = dc)$p.value
+wilcox.test(rClear ~ rTreat , data = dc)$p.value
+wilcox.test(rMeaningful ~ rTreat , data = dc)$p.value
+
+```
+
+In the recidivism context, we again see that all of the metrics show a significant shift in responses.
+
+###Twitter Histograms Greyscale
+
+```{r}
+par(mfrow=c(2,3))
+hist(dt$tcFair, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Fairness", xlab="Fairness", ylim=c(0,175))
+hist(dt$ttFair,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+#legend("topright", c("Control", "Treatment"), fill=c("blue", "red"))
+
+hist(dt$tcAcc, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Accuracy", xlab="Accuracy", ylim=c(0,175))
+hist(dt$ttAcc,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcSat, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Satifaction", xlab="Satisfaction", ylim=c(0,175))
+hist(dt$ttSat,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcUseful, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Usefulness", xlab="Usefulness", ylim=c(0,175))
+hist(dt$ttUseful,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcClear, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Clarity", xlab="Clarity", ylim=c(0,175))
+hist(dt$ttClear,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$tcMeaningful, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Twitter Meaningfulness", xlab="Meaningfulness", ylim=c(0,175))
+hist(dt$ttMeaningful,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+```
+
+###Recidivism Histograms Greyscale
+
+```{r}
+par(mfrow=c(2,3))
+hist(dt$rcFair, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Fairness", xlab="Fairness", ylim=c(0,175))
+hist(dt$rtFair,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+#legend("topright", c("Control", "Treatment"), fill=c("blue", "red"))
+
+hist(dt$rcAcc, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Accuracy", xlab="Accuracy", ylim=c(0,175))
+hist(dt$rtAcc,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcSat, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Satifaction", xlab="Satisfaction", ylim=c(0,175))
+#legend(4,9, Treat(df),lwd=4, col=c())
+hist(dt$rtSat,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcUseful, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Usefulness", xlab="Usefulness", ylim=c(0,175))
+hist(dt$rtUseful,colx=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcClear, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Clarity", xlab="Clarity", ylim=c(0,175))
+hist(dt$rtClear,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+
+hist(dt$rcMeaningful, col=rgb(0.1,0.1,0.1,0.5), breaks = seq(0.5, 5.5, 1), 
+     main= "Recidivism Meaningfulness", xlab="Meaningfulness", ylim=c(0,175))
+hist(dt$rtMeaningful,col=rgb(0.8,0.8,0.8,0.5), breaks = seq(0.5, 5.5, 1), add=T)
+```
+
+###Demographic Data Review
+
+```{r}
+hist(dt$gender,  main = "Gender", breaks = seq(0.5, 3.5, 1))
+hist(dt$ageGroup*10, main = "Age", breaks = seq(5, 85, 10))
+hist(dt$socMed, main= "Social Media Usage", breaks = seq(0.5, 5.5, 1))
+hist(dt$educ, main = "Educational Level", breaks = seq(0.5, 7.5, 1))
+
+ethnic <- c("White", "African American", "Asian", "Hispanic", "Pacific Islander", "Native American", "Other")
+ethnicities <- data.table(sum(!is.na(dt$white)), sum(!is.na(dt$black)), sum(!is.na(dt$asian)), 
+                          sum(!is.na(dt$hispanic)), sum(!is.na(dt$pac_isle)), sum(!is.na(dt$native)), sum(!is.na(dt$other)))
+ethnicities2 = transpose(ethnicities)
+barplot(ethnicities2$V1, names = ethnic)
+
+dc[, .N, by = .(white, black, asian, hispanic, pac_isle, native, other)]
+```
+
+Based on a quick look at our survey demographic responses, we see that approximately 2/3 of the respondents are male. The respondents also skew young, as almost half are between 25 and 34. Nearly 500 of our 641 respondents use social media daily, which is not surprising given we recruited from Mechnical Turk, but it may be biasing our results. More than half have completed a 4 year degree or higher. The respondents are also over 2/3 white. Only 5 identify as none of the given options, 1 selected Pacific Islander, but also identifies as white and Asian. 29 respondents (5%) respondents did not answer the question. 
+
+### Other Data Checks
+
+We had no way of measuring compliance, which in this case would entail respondents answering questions without reading the treatment.
+
+We did notice discrepancies between the number of completed surveys in Qualtrics and Mechanical Turk. Not all respondents who were assigned a random number code after completing the survey in Qualtrics submitted that code in Qualtrics. We found some duplicate IP addresses, but the worker codes in Mechanical Turk were all unique, meaning they came from different Mechanical Turk accounts in the same physical location. Given that Mechanical Turk approves accounts based on unique social security numbers, it may be that these are valid responses from multiple people using the same computer. 
+
+Also, some of the incomplete surveys appear from the same IP address as completed surveys, indicating that someone got part of the way through our survey without finishing it but opened the link again and completed it. Without too much detail about the individual instances, it would be more conservative to leave the results in the analysis, which is what we have done. These are roughly evenly distributed and represent a very small fraction of the overall number of respondents.
+
+## Regression Models
+
+A basic view of the data showed there was a change in the distributions. The Wilcox rank sum test showed the significance of the shift. While linear modelling of Likert scale data can be misleading, we will use regression models to allow us to more fully gauge the significance of these changes. We have created linear models for each question for each context (Twitter and recidivism). The models subset the data to look only at those respondents that were assigned to either treatment or control for that context. In this way, someone who attrited in the first context will not count against the second context, but someone who dropped out midway through a response to context will count in the effects.
+
+### Twitter Moderation
+
+```{r}
+# Create models for each metric. Calculate robust standard errors and p-values
+mtFair <- lm(tFair ~ tTreat, data = dc[tAssign == 1])
+mtFair$se <- sqrt(diag(vcovHC(mtFair)))
+mtFair$p <- coeftest(mtFair, vcovHC(mtFair))[ , 4]
+
+mtAcc <- lm(tAcc ~ tTreat, data = dc[tAssign == 1])
+mtAcc$se <- sqrt(diag(vcovHC(mtAcc)))
+mtAcc$p <- coeftest(mtAcc, vcovHC(mtAcc))[ , 4]
+
+mtSat <- lm(tSat ~ tTreat, data = dc[tAssign == 1])
+mtSat$se <- sqrt(diag(vcovHC(mtSat)))
+mtSat$p <- coeftest(mtSat, vcovHC(mtSat))[ , 4]
+
+mtUseful <- lm(tUseful ~ tTreat, data = dc[tAssign == 1])
+mtUseful$se <- sqrt(diag(vcovHC(mtUseful)))
+mtUseful$p <- coeftest(mtUseful, vcovHC(mtUseful))[ , 4]
+
+mtClear <- lm(tClear ~ tTreat, data = dc[tAssign == 1])
+mtClear$se <- sqrt(diag(vcovHC(mtClear)))
+mtClear$p <- coeftest(mtClear, vcovHC(mtClear))[ , 4]
+
+mtMeaningful <- lm(tMeaningful ~ tTreat, data = dc[tAssign == 1])
+mtMeaningful$se <- sqrt(diag(vcovHC(mtMeaningful)))
+mtMeaningful$p <- coeftest(mtMeaningful, vcovHC(mtMeaningful))[ , 4]
+
+stargazer(mtFair, mtAcc, mtSat, mtUseful, mtClear, mtMeaningful,
+          type = 'text',
+          se = list(mtFair$se, mtAcc$se, mtSat$se, mtUseful$se, mtClear$se, mtMeaningful$se),
+          p = list(mtFair$p, mtAcc$p, mtSat$p, mtUseful$p, mtClear$p, mtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation")
+```
+```{r}
+dc[(tAssign == 1 & tSat == 0), .N]
+dc[(tAssign == 1 & tMeaningful == 0), .N]
+```
+
+This shows that 1 person dropped out between seeing the treatment and responding in the Twitter context. This is probably not affecting our last few metrics, but they are all statistically significant by a large margin anyway. This represents our intent to treat effect for the questions they did not answer. However, they get through all of the first three questions, so those responses are not affected by attrition.
+
+The last three metrics show that the treatment explanation received significantly better responses than the control. The decision metrics (fairness, accuracy, satisfaction) also show significant increases but they are not as strong. The Accuracy metric was the only metric to not receive a significant effect at the 0.05 level. The Wilcox test performed previously showed this was a significant effect, but this view of the ordinal output shows that accuracy is the metric that is affected the least by the treatment.  
+
+### Criminal Recidivism
+
+```{r}
+# Create models for each metric. Calculate robust standard errors and p-values
+mrFair <- lm(rFair ~ rTreat, data = dc[rAssign == 1])
+mrFair$se <- sqrt(diag(vcovHC(mrFair)))
+mrFair$p <- coeftest(mrFair, vcovHC(mrFair))[ , 4]
+
+mrAcc <- lm(rAcc ~ rTreat, data = dc[rAssign == 1])
+mrAcc$se <- sqrt(diag(vcovHC(mrAcc)))
+mrAcc$p <- coeftest(mrAcc, vcovHC(mrAcc))[ , 4]
+
+mrSat <- lm(rSat ~ rTreat, data = dc[rAssign == 1])
+mrSat$se <- sqrt(diag(vcovHC(mrSat)))
+mrSat$p <- coeftest(mrSat, vcovHC(mrSat))[ , 4]
+
+mrUseful <- lm(rUseful ~ rTreat, data = dc[rAssign == 1])
+mrUseful$se <- sqrt(diag(vcovHC(mrUseful)))
+mrUseful$p <- coeftest(mrUseful, vcovHC(mrUseful))[ , 4]
+
+mrClear <- lm(rClear ~ rTreat, data = dc[rAssign == 1])
+mrClear$se <- sqrt(diag(vcovHC(mrClear)))
+mrClear$p <- coeftest(mrClear, vcovHC(mrClear))[ , 4]
+
+mrMeaningful <- lm(rMeaningful ~ rTreat, data = dc[rAssign == 1])
+mrMeaningful$se <- sqrt(diag(vcovHC(mrMeaningful)))
+mrMeaningful$p <- coeftest(mrMeaningful, vcovHC(mrMeaningful))[ , 4]
+
+stargazer(mrFair, mrAcc, mrSat, mrUseful, mrClear, mrMeaningful,
+          type = 'text',
+          se = list(mrFair$se, mrAcc$se, mrSat$se, mrUseful$se, mrClear$se, mrMeaningful$se),
+          p = list(mrFair$p, mrAcc$p, mrSat$p, mrUseful$p, mrClear$p, mrMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Recidivism Risk Assessment")
+```
+
+In the recidivism context, we see statistical significance at the 0.01 level for treatment in all metrics. These are also higher in magnitude than all of the Twitter effects.Again, the effects are larger in magnitude for the explanation based metrics than for the decision metrics. Also as we saw in the Twitter context, satisfaction is the most affected out of the decision metrics. This shows that even if people don't agree with the decision, they are more willing to accept it.
+
+```{r}
+dc[(rAssign == 1 & rSat == 0), .N]
+dc[(rAssign == 1 & rMeaningful == 0), .N]
+```
+
+This shows that 3 people dropped out between seeing the treatment and responding in the recidivism context. This could be throwing off the last few metrics, but those are all statistically significant by a large margin. This represents our intent to treat effect. 
+
+## Comparison of Contexts
+
+Our second research question asked if there was a difference between how respondents evaluated the explanation in two different contexts of varying importance or personal significance. First, we will review this using the Wilcox signed rank test, which is the appropriate test of significance for the data as discussed before. We will filter to only include subjects who were assigned the same treatment in both contexts (control or explanation).
+
+```{r}
+dc[ , diffFair := rFair - tFair]
+dc[ , diffAcc := rAcc - tAcc]
+dc[ , diffSat := rSat - tSat]
+dc[ , diffUseful := rUseful - tUseful]
+dc[ , diffClear := rClear - tClear]
+dc[ , diffMeaningful := rMeaningful - tMeaningful]
+
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffFair)$p.value
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffAcc)$p.value
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffSat)$p.value
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffUseful)$p.value
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffClear)$p.value
+wilcox.test(dc[tTreat == rTreat & complete == 1]$diffMeaningful)$p.value
+
+```
+
+This again shows a highly statistically significant p-value in all metrics, with p-values at 0.0001 and lower. Interestingly, this significance is stronger with the decision metrics and smaller for the explanation metrics. This supports what we saw earlier where the Twitter context showed a lower degree of significance for the decision. As before, we will also look at regression models to show the magnitude of the differences in the context of this study.
+
+```{r results = 'hide'} 
+# Create new data table that will combine metrics across different contexts by creating 
+# two entries per respondent
+dc2 <- melt(dc, id.vars = c('ResponseID', 'tAssign', 'tControl', 'rAssign',
+                            'rControl', "tweet", "recidivism", "tFair", "tAcc",
+                            "tSat", "tUseful", "tClear", "tMeaningful", "rFair",
+                            "rAcc", "rSat", "rUseful", "rClear", "rMeaningful"),
+            measure.vars = c('tTreat', 'rTreat'))
+
+# Rename Columns
+names(dc2)[names(dc2) == "variable"] = "Context"
+names(dc2)[names(dc2) == "value"] = "treat"
+
+# Create new metrics based on which context the row is assigned.
+dc2[, Fair := (Context == 'tTreat')*tFair + (Context == 'rTreat')*rFair]
+dc2[, Acc := (Context == 'tTreat')*tAcc + (Context == 'rTreat')*rAcc]
+dc2[, Sat := (Context == 'tTreat')*tSat + (Context == 'rTreat')*rSat]
+dc2[, Useful := (Context == 'tTreat')*tUseful + (Context == 'rTreat')*rUseful]
+dc2[, Clear := (Context == 'tTreat')*tClear + (Context == 'rTreat')*rClear]
+dc2[, Meaningful := (Context == 'tTreat')*tMeaningful + (Context == 'rTreat')*rMeaningful]
+
+# Remove unnecessary fields
+dc2[,c("tFair", "tAcc", "tSat", "tUseful", "tClear", "tMeaningful", "rFair", "rAcc", 
+       "rSat", "rUseful", "rClear", "rMeaningful"):=NULL]
+```
+
+```{r}
+#Build regression models
+mFair <- lm(Fair ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mFair$se <- sqrt(diag(vcovHC(mFair)))
+mFair$p <- coeftest(mFair, vcovHC(mFair))[ , 4]
+
+mAcc <- lm(Acc ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mAcc$se <- sqrt(diag(vcovHC(mAcc)))
+mAcc$p <- coeftest(mAcc, vcovHC(mAcc))[ , 4]
+
+mSat <- lm(Sat ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mSat$se <- sqrt(diag(vcovHC(mSat)))
+mSat$p <- coeftest(mSat, vcovHC(mSat))[ , 4]
+
+mClear <- lm(Clear ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mClear$se <- sqrt(diag(vcovHC(mClear)))
+mClear$p <- coeftest(mClear, vcovHC(mClear))[ , 4]
+
+mUseful <- lm(Useful ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mUseful$se <- sqrt(diag(vcovHC(mUseful)))
+mUseful$p <- coeftest(mUseful, vcovHC(mUseful))[ , 4]
+
+mMeaningful <- lm(Meaningful ~ factor(Context) + treat + treat*factor(Context), 
+            data = dc2[rAssign == 1 & tAssign == 1])
+mMeaningful$se <- sqrt(diag(vcovHC(mMeaningful)))
+mMeaningful$p <- coeftest(mMeaningful, vcovHC(mMeaningful))[ , 4]
+
+stargazer(mFair, mAcc, mSat, mClear, mUseful, mMeaningful, type = 'text',
+          se = list(mFair$se, mAcc$se, mSat$se, mUseful$se, mClear$se, mMeaningful$se),
+          p = list(mFair$p, mAcc$p, mSat$p, mUseful$p, mClear$p, mMeaningful$p),
+          covariate.labels = c("Recidivism Context", "Treatment", "Recidivism Treatment"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = c("Context Comparison"))
+```
+
+When comparing treatment effects across contexts, we see statistical significance in the baseline contant for all metrics in the fourth row. This represents the constant in the Twitter control group. In the first row of the regression, we see the change to recidivism has a significant negative effect in all metrics. This means that respondents were less accepting of the algorithm's decision with the control explanation than they were in the Twitter context. This may be partly attributable to the design of the survey. Criminal recidivism is a complicated problem with more inputs than a 140 character Tweet. Because we included the full Tweet, people were able to judge the appropriateness of the decision by themselves. In the recidivism context, respondents were only given a brief description of the case, with just the offense the defendant was being charged with. Including some information about criminal history or other factors may have made this a more appropriate comparison.
+
+In the second row, we see what is effectively the same effects with the same significance of the Twitter treatment that we saw in the Twitter only models. The numbers are slightly different here because this analysis looks only at individuals who were assigned to treatment or control in both contexts, whereas previous models included records that may not have made it to a second context. So a few instances are missing in this regression where an individual did not make it to the second half of their survey. In the third row, we see the effect of the recidivism treatment compared to the effect of the Twitter treatment. Again, we have high statistical significance in all metrics as we did in the recidivism only models. However, the significance of the differences is less than of the treatment itself, dropping in 4 of the 6 cases below the 0.01 level, although still significant at a level of 0.05.
+
+When combining the results from the first and third rows, this suggests that the recidivism treatment started from a lower baseline due to the control explanation and therefore had more room to improve. This also shows that the explanation in this context did in fact provide greater effects than the explanation in the Twitter context. In the decision metrics, the sum of the treatment and recidivism treatment effects are approximately equal in magnitude but opposite in direction to the effect of the recidivism context. That means that the Twitter and recidivism contexts ended up at approximately equal ratings for those three metrics. In the explanations metrics, the treatment effects outweight the negative effect of the recidivism control compared to the twitter control. This shows that the recidivism explanation ratings ended up higher than the Twitter context, though not by too much. 
+
+## Difference in Order
+
+We also discussed looking at the difference in responses depending on the order of contexts. Significant effects here would show whether answering one context first created a bias in the response to the second context.
+
+```{r}
+otFair <- lm(tFair ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otFair$se <- sqrt(diag(vcovHC(otFair)))
+otFair$p <- coeftest(otFair, vcovHC(otFair))[ , 4]
+
+otAcc <- lm(tAcc ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otAcc$se <- sqrt(diag(vcovHC(otAcc)))
+otAcc$p <- coeftest(otAcc, vcovHC(otAcc))[ , 4]
+
+otSat <- lm(tSat ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otSat$se <- sqrt(diag(vcovHC(otSat)))
+otSat$p <- coeftest(otSat, vcovHC(otSat))[ , 4]
+
+otUseful <- lm(tUseful ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otUseful$se <- sqrt(diag(vcovHC(otUseful)))
+otUseful$p <- coeftest(otUseful, vcovHC(otUseful))[ , 4]
+
+otClear <- lm(tClear ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otClear$se <- sqrt(diag(vcovHC(otClear)))
+otClear$p <- coeftest(otClear, vcovHC(otClear))[ , 4]
+
+otMeaningful <- lm(tMeaningful ~ tTreat, data = dc[tAssign == 1 & rTreat == 1 & First.Context == "Recidivism"])
+otMeaningful$se <- sqrt(diag(vcovHC(otMeaningful)))
+otMeaningful$p <- coeftest(otMeaningful, vcovHC(otMeaningful))[ , 4]
+
+stargazer(otFair, otAcc, otSat, otUseful, otClear, otMeaningful,
+          type = 'text',
+          se = list(otFair$se, otAcc$se, otSat$se, otUseful$se, otClear$se, otMeaningful$se),
+          p = list(otFair$p, otAcc$p, otSat$p, otUseful$p, otClear$p, otMeaningful$p),
+          covariate.labels = c("Twitter Treatment"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Effects of Seeing Twitter Moderation After Recidivism Treatment")
+```
+
+In the case of Twitter moderation, there does seem to be a difference based on order of context. There is no significant effect to receiving the Twitter treatment if the respondent had already seen the recidivism treatment. This is different from our overall twitter treatment effect, which implies that the effect is stronger in the other groups.
+
+```{r}
+orFair <- lm(rFair ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orFair$se <- sqrt(diag(vcovHC(orFair)))
+orFair$p <- coeftest(orFair, vcovHC(orFair))[ , 4]
+
+orAcc <- lm(rAcc ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orAcc$se <- sqrt(diag(vcovHC(orAcc)))
+orAcc$p <- coeftest(orAcc, vcovHC(orAcc))[ , 4]
+
+orSat <- lm(rSat ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orSat$se <- sqrt(diag(vcovHC(orSat)))
+orSat$p <- coeftest(orSat, vcovHC(orSat))[ , 4]
+
+orUseful <- lm(rUseful ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orUseful$se <- sqrt(diag(vcovHC(orUseful)))
+orUseful$p <- coeftest(orUseful, vcovHC(orUseful))[ , 4]
+
+orClear <- lm(rClear ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orClear$se <- sqrt(diag(vcovHC(orClear)))
+orClear$p <- coeftest(orClear, vcovHC(orClear))[ , 4]
+
+orMeaningful <- lm(rMeaningful ~ rTreat, data = dc[rAssign == 1 & tTreat == 1 & First.Context == "Twitter"])
+orMeaningful$se <- sqrt(diag(vcovHC(orMeaningful)))
+orMeaningful$p <- coeftest(orMeaningful, vcovHC(orMeaningful))[ , 4]
+
+stargazer(orFair, orAcc, orSat, orUseful, orClear, orMeaningful,
+          type = 'text',
+          se = list(orFair$se, orAcc$se, orSat$se, orUseful$se, orClear$se, orMeaningful$se),
+          p = list(orFair$p, orAcc$p, orSat$p, orUseful$p, orClear$p, orMeaningful$p),
+          covariate.labels = c("Treatment" ),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Effects of Seeing Recidivism Context After Twitter Treatment")
+```
+
+Interestingly, people who saw Twitter treatment first still showed a significant effect for the recidivism treatment. This is opposite what we saw from respondents who saw recidivism treatment before twitter treatment. The magnitude of effect for all metrics is also larger than the corresponding treatment effects we saw in the overall comparison.  
+
+## Influence of Other Factors - Demographics, etc
+
+While not in response to our research questions, we do want to check the other data we have in case there are any important differences based on  demographics.
+
+### Race
+
+First, we will check the Twitter context to see if there is any difference in treatment effects due to race. Because the large majority of our sample is white males, we will regress on those factors to see if they differ from the rest of the sample population. Some of the individual minority groups had very low numbers, as shown previously, and including them in a regression will not provide a meaningful output.
+
+```{r}
+dtFair <- lm(tFair ~ tTreat + tTreat*white + white, data = dc)
+dtFair$se <- sqrt(diag(vcovHC(dtFair, type = "HC1")))
+dtFair$p <- coeftest(dtFair, vcovHC(dtFair, type = "HC1"))[ , 4]
+
+dtAcc <- lm(tAcc ~ tTreat + tTreat*white + white, data = dc)
+dtAcc$se <- sqrt(diag(vcovHC(dtAcc, type = "HC1")))
+dtAcc$p <- coeftest(dtAcc, vcovHC(dtAcc, type = "HC1"))[ , 4]
+
+dtSat <-lm(tSat ~ tTreat + tTreat*white + white, data = dc)
+dtSat$se <- sqrt(diag(vcovHC(dtSat, type = "HC1")))
+dtSat$p <- coeftest(dtSat, vcovHC(dtSat, type = "HC1"))[ , 4]
+
+dtUseful <- lm(tUseful ~ tTreat + tTreat*white + white, data = dc)
+dtUseful$se <- sqrt(diag(vcovHC(dtUseful, type = "HC1")))
+dtUseful$p <- coeftest(dtUseful, vcovHC(dtUseful, type = "HC1"))[ , 4]
+
+dtClear <- lm(tClear ~ tTreat + tTreat*white + white, data = dc)
+dtClear$se <- sqrt(diag(vcovHC(dtClear, type = "HC1")))
+dtClear$p <- coeftest(dtClear, vcovHC(dtClear, type = "HC1"))[ , 4]
+
+dtMeaningful <- lm(tMeaningful ~ tTreat + tTreat*white + white, data = dc)
+dtMeaningful$se <- sqrt(diag(vcovHC(dtMeaningful, type = "HC1")))
+dtMeaningful$p <- coeftest(dtMeaningful, vcovHC(dtMeaningful, type = "HC1"))[ , 4]
+
+stargazer(dtFair, dtAcc, dtSat, dtUseful, dtClear, dtMeaningful,
+          type = 'text',
+          se = list(dtFair$se, dtAcc$se, dtSat$se, dtUseful$se, dtClear$se, dtMeaningful$se),
+          p = list(dtFair$p, dtAcc$p, dtSat$p, dtUseful$p, dtClear$p, dtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation - Race")
+```
+
+This output shows significant differences between whites and minorities all across the board. Whites rated the control explanation higher in all metrics than minorities. Interestingly, for most of the metrics, the magnitude of the difference in white and minority ratings on the control is the similar to that of the treatment effect on whites, though opposite in direction. So ultimately, whites and minorities provide a similar final rating to the treatment explanation.
+
+```{r}
+drFair <- lm(rFair ~ rTreat + rTreat*white + white, data = dc)
+drFair$se <- sqrt(diag(vcovHC(drFair, type = "HC1")))
+drFair$p <- coeftest(drFair, vcovHC(drFair, type = "HC1"))[ , 4]
+
+drAcc <- lm(rAcc ~ rTreat + rTreat*white + white, data = dc)
+drAcc$se <- sqrt(diag(vcovHC(drAcc, type = "HC1")))
+drAcc$p <- coeftest(drAcc, vcovHC(drAcc, type = "HC1"))[ , 4]
+
+drSat <-lm(rSat ~ rTreat + rTreat*white + white, data = dc)
+drSat$se <- sqrt(diag(vcovHC(drSat, type = "HC1")))
+drSat$p <- coeftest(drSat, vcovHC(drSat, type = "HC1"))[ , 4]
+
+drUseful <- lm(rUseful ~ rTreat + rTreat*white + white, data = dc)
+drUseful$se <- sqrt(diag(vcovHC(drUseful, type = "HC1")))
+drUseful$p <- coeftest(drUseful, vcovHC(drUseful, type = "HC1"))[ , 4]
+
+drClear <- lm(rClear ~ rTreat + rTreat*white + white, data = dc)
+drClear$se <- sqrt(diag(vcovHC(drClear, type = "HC1")))
+drClear$p <- coeftest(drClear, vcovHC(drClear, type = "HC1"))[ , 4]
+
+drMeaningful <- lm(rMeaningful ~ rTreat + rTreat*white + white, data = dc)
+drMeaningful$se <- sqrt(diag(vcovHC(drMeaningful, type = "HC1")))
+drMeaningful$p <- coeftest(drMeaningful, vcovHC(drMeaningful, type = "HC1"))[ , 4]
+
+stargazer(drFair, drAcc, drSat, drUseful, drClear, drMeaningful,
+          type = 'text',
+          se = list(drFair$se, drAcc$se, drSat$se, drUseful$se, drClear$se, drMeaningful$se),
+          p = list(drFair$p, drAcc$p, drSat$p, drUseful$p, drClear$p, drMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Criminal Recidivism Risk Assessment - Race")
+```
+
+The results above show no significant differences between whites and minorities in either the control or treatment conditions in the recidivism example. Analysis of some of the individual minority groups did show differences, but many of them had too few respondents to trust the estimates of significance. 
+
+### Gender
+
+```{r}
+dtFair <- lm(tFair ~ tTreat + tTreat*male + male, data = dc)
+dtFair$se <- sqrt(diag(vcovHC(dtFair, type = "HC1")))
+dtFair$p <- coeftest(dtFair, vcovHC(dtFair, type = "HC1"))[ , 4]
+
+dtAcc <- lm(tAcc ~ tTreat + tTreat*male + male, data = dc)
+dtAcc$se <- sqrt(diag(vcovHC(dtAcc, type = "HC1")))
+dtAcc$p <- coeftest(dtAcc, vcovHC(dtAcc, type = "HC1"))[ , 4]
+
+dtSat <-lm(tSat ~ tTreat + tTreat*male + male, data = dc)
+dtSat$se <- sqrt(diag(vcovHC(dtSat, type = "HC1")))
+dtSat$p <- coeftest(dtSat, vcovHC(dtSat, type = "HC1"))[ , 4]
+
+dtUseful <- lm(tUseful ~ tTreat + tTreat*male + male, data = dc)
+dtUseful$se <- sqrt(diag(vcovHC(dtUseful, type = "HC1")))
+dtUseful$p <- coeftest(dtUseful, vcovHC(dtUseful, type = "HC1"))[ , 4]
+
+dtClear <- lm(tClear ~ tTreat + tTreat*male + male, data = dc)
+dtClear$se <- sqrt(diag(vcovHC(dtClear, type = "HC1")))
+dtClear$p <- coeftest(dtClear, vcovHC(dtClear, type = "HC1"))[ , 4]
+
+dtMeaningful <- lm(tMeaningful ~ tTreat + tTreat*male + male, data = dc)
+dtMeaningful$se <- sqrt(diag(vcovHC(dtMeaningful, type = "HC1")))
+dtMeaningful$p <- coeftest(dtMeaningful, vcovHC(dtMeaningful, type = "HC1"))[ , 4]
+
+stargazer(dtFair, dtAcc, dtSat, dtUseful, dtClear, dtMeaningful,
+          type = 'text',
+          se = list(dtFair$se, dtAcc$se, dtSat$se, dtUseful$se, dtClear$se, dtMeaningful$se),
+          p = list(dtFair$p, dtAcc$p, dtSat$p, dtUseful$p, dtClear$p, dtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation - Gender")
+```
+
+When viewing differences in gender, we see very few significant effects. The explanation itself has lost significance for all metrics except usefulness. Men report being significantly less satisfied with the decision under control than women. While there was not a lot of significance, all of the metrics received lower scores from men than women. This was somewhat expected given the nature of the tweet being more likely to be offensive to women.
+
+```{r}
+drFair <- lm(rFair ~ rTreat + rTreat*male + male, data = dc)
+drFair$se <- sqrt(diag(vcovHC(drFair, type = "HC1")))
+drFair$p <- coeftest(drFair, vcovHC(drFair, type = "HC1"))[ , 4]
+
+drAcc <- lm(rAcc ~ rTreat + rTreat*male + male, data = dc)
+drAcc$se <- sqrt(diag(vcovHC(drAcc, type = "HC1")))
+drAcc$p <- coeftest(drAcc, vcovHC(drAcc, type = "HC1"))[ , 4]
+
+drSat <-lm(rSat ~ rTreat + rTreat*male + male, data = dc)
+drSat$se <- sqrt(diag(vcovHC(drSat, type = "HC1")))
+drSat$p <- coeftest(drSat, vcovHC(drSat, type = "HC1"))[ , 4]
+
+drUseful <- lm(rUseful ~ rTreat + rTreat*male + male, data = dc)
+drUseful$se <- sqrt(diag(vcovHC(drUseful, type = "HC1")))
+drUseful$p <- coeftest(drUseful, vcovHC(drUseful, type = "HC1"))[ , 4]
+
+drClear <- lm(rClear ~ rTreat + rTreat*male + male, data = dc)
+drClear$se <- sqrt(diag(vcovHC(drClear, type = "HC1")))
+drClear$p <- coeftest(drClear, vcovHC(drClear, type = "HC1"))[ , 4]
+
+drMeaningful <- lm(rMeaningful ~ rTreat + rTreat*male + male, data = dc)
+drMeaningful$se <- sqrt(diag(vcovHC(drMeaningful, type = "HC1")))
+drMeaningful$p <- coeftest(drMeaningful, vcovHC(drMeaningful, type = "HC1"))[ , 4]
+
+stargazer(drFair, drAcc, drSat, drUseful, drClear, drMeaningful,
+          type = 'text',
+          se = list(drFair$se, drAcc$se, drSat$se, drUseful$se, drClear$se, drMeaningful$se),
+          p = list(drFair$p, drAcc$p, drSat$p, drUseful$p, drClear$p, drMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Criminal Recidivism - Gender")
+```
+
+In the context of recidivism, there are no significant differences between males and females, either in control or treatment.
+
+### Age
+
+Age was defined by groupings of mostly 10 year increments. This requires a regression on the factors of the variable as they are not continuous values.
+
+```{r}
+dtFair <- lm(tFair ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtFair$se <- sqrt(diag(vcovHC(dtFair, type = "HC1")))
+dtFair$p <- coeftest(dtFair, vcovHC(dtFair, type = "HC1"))[ , 4]
+
+dtAcc <- lm(tAcc ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtAcc$se <- sqrt(diag(vcovHC(dtAcc, type = "HC1")))
+dtAcc$p <- coeftest(dtAcc, vcovHC(dtAcc, type = "HC1"))[ , 4]
+
+dtSat <-lm(tSat ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtSat$se <- sqrt(diag(vcovHC(dtSat, type = "HC1")))
+dtSat$p <- coeftest(dtSat, vcovHC(dtSat, type = "HC1"))[ , 4]
+
+dtUseful <- lm(tUseful ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtUseful$se <- sqrt(diag(vcovHC(dtUseful, type = "HC1")))
+dtUseful$p <- coeftest(dtUseful, vcovHC(dtUseful, type = "HC1"))[ , 4]
+
+dtClear <- lm(tClear ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtClear$se <- sqrt(diag(vcovHC(dtClear, type = "HC1")))
+dtClear$p <- coeftest(dtClear, vcovHC(dtClear, type = "HC1"))[ , 4]
+
+dtMeaningful <- lm(tMeaningful ~ tTreat + factor(ageGroup) + tTreat*factor(ageGroup), data = dc)
+dtMeaningful$se <- sqrt(diag(vcovHC(dtMeaningful, type = "HC1")))
+dtMeaningful$p <- coeftest(dtMeaningful, vcovHC(dtMeaningful, type = "HC1"))[ , 4]
+
+stargazer(dtFair, dtAcc, dtSat, dtUseful, dtClear, dtMeaningful,
+          type = 'text',
+          se = list(dtFair$se, dtAcc$se, dtSat$se, dtUseful$se, dtClear$se, dtMeaningful$se),
+          p = list(dtFair$p, dtAcc$p, dtSat$p, dtUseful$p, dtClear$p, dtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation")
+
+
+```
+
+There seem to be some significance to the effects, although many of these age groups are not well represented as shown previously. Note that the last age group does not even have any members that were placed into control. It might be more appropriate to bin these groups in a different way to test whether or not the largest group (ages 25-34) is somehow different. Subsequently, we will not test on the recidivism context.
+
+### Education
+Education was not collected as years of education, but as levels of education. It is appropriate to look at the factors for treatment effects.
+```{r}
+dtFair <- lm(tFair ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtFair$se <- sqrt(diag(vcovHC(dtFair, type = "HC1")))
+dtFair$p <- coeftest(dtFair, vcovHC(dtFair, type = "HC1"))[ , 4]
+
+dtAcc <- lm(tAcc ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtAcc$se <- sqrt(diag(vcovHC(dtAcc, type = "HC1")))
+dtAcc$p <- coeftest(dtAcc, vcovHC(dtAcc, type = "HC1"))[ , 4]
+
+dtSat <-lm(tSat ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtSat$se <- sqrt(diag(vcovHC(dtSat, type = "HC1")))
+dtSat$p <- coeftest(dtSat, vcovHC(dtSat, type = "HC1"))[ , 4]
+
+dtUseful <- lm(tUseful ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtUseful$se <- sqrt(diag(vcovHC(dtUseful, type = "HC1")))
+dtUseful$p <- coeftest(dtUseful, vcovHC(dtUseful, type = "HC1"))[ , 4]
+
+dtClear <- lm(tClear ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtClear$se <- sqrt(diag(vcovHC(dtClear, type = "HC1")))
+dtClear$p <- coeftest(dtClear, vcovHC(dtClear, type = "HC1"))[ , 4]
+
+dtMeaningful <- lm(tMeaningful ~ tTreat + factor(educ) + tTreat*factor(educ), data = dc)
+dtMeaningful$se <- sqrt(diag(vcovHC(dtMeaningful, type = "HC1")))
+dtMeaningful$p <- coeftest(dtMeaningful, vcovHC(dtMeaningful, type = "HC1"))[ , 4]
+
+stargazer(dtFair, dtAcc, dtSat, dtUseful, dtClear, dtMeaningful,
+          type = 'text',
+          se = list(dtFair$se, dtAcc$se, dtSat$se, dtUseful$se, dtClear$se, dtMeaningful$se),
+          p = list(dtFair$p, dtAcc$p, dtSat$p, dtUseful$p, dtClear$p, dtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation")
+
+
+```
+
+Satisfaction seems to be significant across all levels of education. There do not seem to be significant differences within metrics or across education levels. Subsequently, we will not test on the recidivism context.
+
+### Social Media Usage
+
+```{r}
+dtFair <- lm(tFair ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtFair$se <- sqrt(diag(vcovHC(dtFair, type = "HC1")))
+dtFair$p <- coeftest(dtFair, vcovHC(dtFair, type = "HC1"))[ , 4]
+
+dtAcc <- lm(tAcc ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtAcc$se <- sqrt(diag(vcovHC(dtAcc, type = "HC1")))
+dtAcc$p <- coeftest(dtAcc, vcovHC(dtAcc, type = "HC1"))[ , 4]
+
+dtSat <-lm(tSat ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtSat$se <- sqrt(diag(vcovHC(dtSat, type = "HC1")))
+dtSat$p <- coeftest(dtSat, vcovHC(dtSat, type = "HC1"))[ , 4]
+
+dtUseful <- lm(tUseful ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtUseful$se <- sqrt(diag(vcovHC(dtUseful, type = "HC1")))
+dtUseful$p <- coeftest(dtUseful, vcovHC(dtUseful, type = "HC1"))[ , 4]
+
+dtClear <- lm(tClear ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtClear$se <- sqrt(diag(vcovHC(dtClear, type = "HC1")))
+dtClear$p <- coeftest(dtClear, vcovHC(dtClear, type = "HC1"))[ , 4]
+
+dtMeaningful <- lm(tMeaningful ~ tTreat + factor(socMed) + tTreat*factor(socMed), data = dc)
+dtMeaningful$se <- sqrt(diag(vcovHC(dtMeaningful, type = "HC1")))
+dtMeaningful$p <- coeftest(dtMeaningful, vcovHC(dtMeaningful, type = "HC1"))[ , 4]
+
+stargazer(dtFair, dtAcc, dtSat, dtUseful, dtClear, dtMeaningful,
+          type = 'text',
+          se = list(dtFair$se, dtAcc$se, dtSat$se, dtUseful$se, dtClear$se, dtMeaningful$se),
+          p = list(dtFair$p, dtAcc$p, dtSat$p, dtUseful$p, dtClear$p, dtMeaningful$p),
+          covariate.labels = c("Explanation"),
+          dep.var.labels = c("Fairness", "Accuracy", "Satisfaction", "Usefulness",
+                             "Clarity", "Meaningfulness"),
+          dep.var.caption = "Twitter Moderation")
+
+
+```
+
+Again, there is some scattered significance throughout these models. The explanation has high significance for the control group, which is daily users. However, this is an incredibly large portion of the respondent population, so that is not surprising given our overall results. And it is difficult to trust the small sample sizes of the other groups. They also have larger errors, showing great variation, so we cannot draw conclusions from these groups. We will also not look at social media usage with respect to recidivism, as there wwere not many significant effects of social media use on Twitter moderation, which is more likely to be impacted by social media usage habits.
+
+###What Additional Information did respondents want?
+
+In each context, respondents were asked what information they would like to see as part of an explanation. This question was multiple choice with multiple selection allowed as well as a text write-in section. The three options were:
+
+a. Examples of other levels of decision output
+b. Relative importance of the characteristics that led to the decision
+c. Detailed description of how the algorithm works.
+
+```{r}
+# Find total number of those who selected each option.
+tcsumReqInfo1<-sum(dt$tcReqInfo1, na.rm=TRUE)
+tcsumReqInfo2<-sum(dt$tcReqInfo2, na.rm=TRUE)
+tcsumReqInfo3<-sum(dt$tcReqInfo3, na.rm=TRUE)
+
+ttsumReqInfo1<-sum(dt$ttReqInfo1, na.rm=TRUE)
+ttsumReqInfo2<-sum(dt$ttReqInfo2, na.rm=TRUE)
+ttsumReqInfo3<-sum(dt$ttReqInfo3, na.rm=TRUE)
+
+rcsumReqInfo1<-sum(dt$rcReqInfo1, na.rm=TRUE)
+rcsumReqInfo2<-sum(dt$rcReqInfo2, na.rm=TRUE)
+rcsumReqInfo3<-sum(dt$rcReqInfo3, na.rm=TRUE)
+
+rtsumReqInfo1<-sum(dt$rtReqInfo1, na.rm=TRUE)
+rtsumReqInfo2<-sum(dt$rtReqInfo2, na.rm=TRUE)
+rtsumReqInfo3<-sum(dt$rtReqInfo3, na.rm=TRUE)
+
+
+Number <- c("Other examples","Relative importance","Algorithm detail")
+tc <- c(tcsumReqInfo1,tcsumReqInfo2,tcsumReqInfo3)
+tt <- c(ttsumReqInfo1,ttsumReqInfo2,ttsumReqInfo3)
+rc <- c(rcsumReqInfo1,rcsumReqInfo2,rcsumReqInfo3)
+rt <- c(rtsumReqInfo1,rtsumReqInfo2,rtsumReqInfo3)
+nyx <- data.frame(Number,tc,tt, rc, rt)
+
+# reshape your data into long format
+nyxlong <- melt(nyx, id=c("Number"))
+
+# make the plot
+ggplot(nyxlong) +
+  geom_bar(aes(x = Number, y = value, fill = variable),
+           stat="identity", position = "dodge", width = 0.7) +
+  scale_fill_manual("Result\n", values = c("deepskyblue","blue4", "firebrick1","firebrick4"),
+                    labels = c("Twitter control", "Twitter treatment","Recidivism control",
+                               "Recidivism treatment")) +
+  labs(x="\nAdditional Explanation",y="Result\n") +
+  theme_bw(base_size = 14)
+
+```
+
+While not everyone answered this question, we see a consistent distribution of choices. The Relative Importance of factors was the most often selected in each combination of context and treatment. The Algorithm Details was a close second in many combinations of context and treatment, nearly the same as Relative Importance in the recidivism control. The control group almost always asked for more explanation than the treatment group, which can likely be attributed to the effectiveness of the explanation. A regression would show whether or not this is a significant effect. The only exception to this is that the Twitter treatment group selected Other Examples more than the control. This is a small difference in the least populated selection, and it is a smaller difference than the other options. 
+
+###Text Outputs
+##Twitter control 
+again, whether there's any oversight into the decision or any appeals (though in this specific case it was clearly valid)
+Explanation of why they feel it's right to limit free speech.
+Freedom of speech infringement, you can not like the guy but twitter shouldn't silence his viewpoint, individuals should block him. When you are a platform for social interaction you shouldn't be allowed to restrict who can say what.
+None, I am against the restriction of the freedom of speech.
+none, moderation should be done by humans
+Statistics on pattern of behavior of banned individual, whether wrong people have ever been flagged
+What conduct rule in particular was deemed violated by the algorithm.
+
+##Twitter treatment
+A contextual analysis of the actual subject of the comment
+an explanation of the 70% threshold
+Definition of the characteristics
+Explanation of Sentiment Analysis
+Explanation on what is sentiment analysis and how it was judged
+I am perfectly satisfied with the explanation exactly as it is.
+I'm satisfied with the information.
+It should be stacked. All of the bars should add together. The way it's set up now, it could be at 69% threshold for all criteria and still would not have any action taken against it.
+more detailed explanation of the graph
+No other information required.
+nothing, it is ridiculous
+Proper spelling and explanation of sentiment decisions
+What "sentiment analysis" means. Is this thing reacting to everything it views as expressing a negative or argumentative attitude?
+when does using offensive vocabulary mean you are guilty, then pretty much all of us would be in jail and not got out of college
+Why Twitter feels the need to implement an algorithm like this at all.
+
+##Recidivism control
+A human isn't simple enough, there are going to be many factors that won't be considered.
+Again - riduculous just as previous answer - doesn't take "person" into account, just numbers
+An explanation of why and how they use an algorithm in court--and who allowed it.
+basically, it needs tons more information to make a decision like that
+none
+past success percentage
+Statistics on accuracy
+the specific information the algorithm uses to make the assessment
+what happened to innocent until proven guilty?  you can not make assessment of someone based on algorithm when they did not do anything wrong
+whether there's any human oversight into the decision
+
+##Recidivism treatment
+ A possibility of a human psychologist or social worker weighing in on the algorithm results too.
+An explanation of how level of criminal personality was determined.
+biases of those who wrote the algorithm
+Definitions of each
+How it can assume that everyone is the same based on answers.
+human evaluation
+I want to review the source code, the questions, the regression test results (when it was tested on repeat offenders)
+I would like to know what information the algorithm considered when making the decision.
+I'm already satisfied with the explanation.
+More detailed breakdown of what is meant in this context by phrases like "criminal personality"
+NONE
+Numbers
+records showing other uses that turned out to be accurate and the percentage of accuracy overall
+
+
+
