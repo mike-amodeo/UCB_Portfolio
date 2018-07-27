@@ -5,7 +5,7 @@ Projects included in this portfolio:
 
 1. Lead Alert
 
-Project lead for this capstone project using machine learning to predict lead contamination in water sources throughout the state of California. Assembly Bill 746 passed in 2017 requires lead testing at all public schools to be complete by 2019. Early returns on this data could be used as label data to create an ML model that would predict lead contamination based on community feature data. The dataset provided challenges around imbalanced data, as less than 5% of samples showed contamination. This required the use of techniques such as Synthetic Minority Oversampling Technique (SMOTE) to avoid overfitting to the minority data records. More complete information can be found at the project website, [leadalert.io](leadalert.io), including a technical white paper and a public repo with all code and data.
+Project lead for this capstone project using machine learning to predict lead contamination in water sources throughout the state of California. Assembly Bill 746 passed in 2017 requires lead testing at all public schools to be complete by 2019. Early returns on this data could be used as label data to create an ML model that would predict lead contamination based on community feature data. The dataset provided challenges around imbalanced data, as less than 5% of samples showed contamination. This required the use of techniques such as Synthetic Minority Oversampling Technique (SMOTE) to avoid overfitting to the minority data records. More complete information can be found at the project website, [leadalert.io](www.leadalert.io), including a technical white paper and a public repo with all code and data.
 
 2. Yelp Dataset Challenge
 
